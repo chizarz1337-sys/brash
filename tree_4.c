@@ -4,6 +4,17 @@
 #include <math.h>
 #include <ctype.h>
 
+// Forward функций команд
+void expr(const char* str);
+void prf(void);
+void pst(void);
+void save_prf(void);
+void save_pst(void);
+void eval(const char* str);
+
+// Функция парсингакоманд
+void process_commands(FILE* in, FILE* out);
+
 typedef enum { NODE_OP, NODE_NUM, NODE_VAR } NodeType;
 
 // Таблица переменных
@@ -268,6 +279,90 @@ void freeTree(Node* node) {
     freeTree(node->left);
     freeTree(node->right);
     free(node); // Дать обертку для подсчета
+}
+
+void expr(const char* str){
+    return;
+}
+
+void prf(void){
+    return;
+}
+
+void pst(void){
+    return;
+}
+
+void save_prf(void){
+    return;
+}
+
+void save_pst(void){
+    return;
+}
+
+void eval(const char* str){
+    return;
+}
+
+void process_commands(FILE* in, FILE* out) {
+    char line[4096];      // Буфер для чтения строки из файла
+    char arg[1024];       // Буфер для аргументов (ровно 1024 байта по условию)
+
+    while (fgets(line, sizeof(line), in) != NULL) {
+        // 1. Игнорируем пустые строки
+        if (line[0] == '\n' || line[0] == '\r' || line[0] == '\0') {
+            continue;
+        }
+
+        // 2. Если строка начинается с пробельного символа
+        if (isspace((unsigned char)line[0])) {
+            fprintf(out, "incorrent\n");
+            continue;
+        }
+
+        // Вспомогательная логика копирования аргумента (inline для наглядности)
+        #define COPY_ARG(start_idx) \
+        do { \
+            const char* src = line + (start_idx); \
+            size_t i = 0; \
+            while (i < 1024 && src[i] != '\n' && src[i] != '\r' && src[i] != '\0') { \
+                arg[i] = src[i]; \
+                i++; \
+            } \
+            /* Замена последнего символа на \0 при достижении лимита или конце строки */ \
+            if (i == 1024) arg[1023] = '\0'; \
+            else arg[i] = '\0'; \
+        } while(0)
+
+        // 3. Парсинг и вызов команд
+        if (strncmp(line, "parse ", 6) == 0) {
+            COPY_ARG(6);
+            expr(arg);
+        }
+        else if (strncmp(line, "load_prf", 8) == 0 && (line[8] == ' ' || line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
+            prf();
+        }
+        else if (strncmp(line, "load_pst", 8) == 0 && (line[8] == ' ' || line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
+            pst();
+        }
+        else if (strncmp(line, "save_prf", 8) == 0 && (line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
+            save_prf();
+        }
+        else if (strncmp(line, "save_pst", 8) == 0 && (line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
+            save_pst();
+        }
+        else if (strncmp(line, "eval ", 5) == 0) {
+            COPY_ARG(5);
+            eval(arg);
+        }
+        else {
+            // Неизвестная команда
+            fprintf(out, "incorrent\n");
+        }
+
+        #undef COPY_ARG
+    }
 }
 
 int main() {
