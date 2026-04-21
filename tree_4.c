@@ -4,12 +4,20 @@
 #include <math.h>
 #include <ctype.h>
 
-typedef enum { NODE_OP, NODE_NUM } NodeType;
+typedef enum { NODE_OP, NODE_NUM, NODE_VAR } NodeType;
+
+// Таблица переменных
+#define MAX_VARS 64
+#define VAR_NAME_LEN 64
+typedef struct { char name[VAR_NAME_LEN]; double value; int defined; } VarEntry;
+VarEntry symTable[MAX_VARS];
+int symCount = 0;
 
 typedef struct Node {
     NodeType type;
     char op;            // '+', '-', '*', '/', '%', '@', '!'
     double value;       // Для чисел
+    char var[64];       // Для переменных
     struct Node *left;
     struct Node *right;
 } Node;
@@ -31,8 +39,12 @@ Node* parseLCM();
 Node* parseUnary();
 Node* parseFactor();
 
+// Forward функции для определения переменных
+void setVar(const char* name, double value);
+double getVar(const char* name);
+
 // Функция создания узла
-Node* createNode(NodeType type, char op, double val, Node* l, Node* r) {
+Node* createNode(NodeType type, char op, double val, char var[], Node* l, Node* r) {
     Node* node = (Node*)malloc(sizeof(Node));
     if (!node) {
         fprintf(stderr, "Ошибка выделения памяти\n");
@@ -41,6 +53,15 @@ Node* createNode(NodeType type, char op, double val, Node* l, Node* r) {
     node->type = type;
     node->op = op;
     node->value = val;
+    
+    // Копируем имя переменной (если есть)
+    if (var && var[0] != '\0') {
+        strncpy(node->var, var, 63);
+        node->var[63] = '\0';  // Гарантируем нуль-терминацию
+    } else {
+        node->var[0] = '\0';
+    }
+    
     node->left = l;
     node->right = r;
     return node;
@@ -52,7 +73,7 @@ Node* parseExpression() {
     skipSpaces();
     while (*input == '+' || *input == '-') {
         char op = *input++;
-        left = createNode(NODE_OP, op, 0, left, parseTerm());
+        left = createNode(NODE_OP, op, 0, NULL, left, parseTerm());
         skipSpaces();
     }
     return left;
@@ -64,7 +85,7 @@ Node* parseTerm() {
     skipSpaces();
     while (*input == '*' || *input == '/' || *input == '%') {
         char op = *input++;
-        left = createNode(NODE_OP, op, 0, left, parseLCM());
+        left = createNode(NODE_OP, op, 0, NULL, left, parseLCM());
         skipSpaces();
     }
     return left;
@@ -76,7 +97,7 @@ Node* parseLCM() {
     skipSpaces();
     while (*input == '@') {
         char op = *input++;
-        left = createNode(NODE_OP, op, 0, left, parseUnary());
+        left = createNode(NODE_OP, op, 0,  NULL, left, parseUnary());
         skipSpaces();
     }
     return left;
@@ -88,15 +109,17 @@ Node* parseUnary() {
     skipSpaces();
     while (*input == '!') {
         char op = *input++;
-        node = createNode(NODE_OP, op, 0, node, NULL);
+        node = createNode(NODE_OP, op, 0, NULL, node, NULL);
         skipSpaces();
     }
     return node;
 }
 
-// 1. Высший приоритет: скобки и сами числа
+// 1. Высший приоритет: скобки, числа и переменные
 Node* parseFactor() {
     skipSpaces();
+    
+    // Обработка скобок
     if (*input == '(') {
         input++; // Пропускаем '('
         Node* node = parseExpression();
@@ -104,15 +127,29 @@ Node* parseFactor() {
         if (*input == ')') input++; // Пропускаем ')'
         return node;
     }
+    
+    // Проверка на переменную (идентификатор: буква или _ в начале)
+    if (isalpha((unsigned char)*input) || *input == '_') {
+        char varName[64];
+        int i = 0;
+        // Читаем имя переменной: буквы, цифры, подчёркивания
+        while ((isalnum((unsigned char)*input) || *input == '_') && i < 63) {
+            varName[i++] = *input++;
+        }
+        varName[i] = '\0';
+        // Создаём узел типа NODE_VAR с именем переменной
+        return createNode(NODE_VAR, 0, 0, varName, NULL, NULL);
+    }
+    
     // Читаем число
     char* endptr;
     double val = strtod(input, &endptr);
     if (endptr == input) {
-        fprintf(stderr, "Ошибка синтаксиса: ожидалось число или '(' в позиции: %s\n", input);
+        fprintf(stderr, "Ошибка синтаксиса: ожидалось число, переменная или '(' в позиции: %s\n", input);
         exit(EXIT_FAILURE);
     }
     input = endptr;
-    return createNode(NODE_NUM, 0, val, NULL, NULL);
+    return createNode(NODE_NUM, 0, val, NULL, NULL, NULL);
 }
 
 // Вспомогательная функция для НОД
@@ -145,11 +182,17 @@ double calculateFactorial(double n) {
 }
 
 // ГЛАВНАЯ ФУНКЦИЯ ОБХОДА ДЕРЕВА
-double calculate(Node* node) {
+double calculate(struct Node* node) {
     if (node == NULL) return 0;
+    
     if (node->type == NODE_NUM) {
         return node->value;
     }
+
+    if (node->type == NODE_VAR) {
+        return getVar(node->var);
+    }
+
     double leftVal = calculate(node->left);
     double rightVal = calculate(node->right);
     switch (node->op) {
@@ -170,12 +213,61 @@ double calculate(Node* node) {
     }
 }
 
+double getVar(const char* name) {
+    if (!name || !*name) {
+        fprintf(stderr, "Ошибка: пустое имя переменной при чтении\n");
+        return 0;
+    }
+
+    for (int i = 0; i < symCount; i++) {
+        if (strcmp(symTable[i].name, name) == 0) {
+            if (!symTable[i].defined) {
+                fprintf(stderr, "Ошибка: переменная '%s' объявлена, но не имеет значения\n", name);
+                return 0;
+            }
+            return symTable[i].value;
+        }
+    }
+
+    // Переменная не найдена
+    fprintf(stderr, "Ошибка: переменная '%s' не определена. Используйте: eval %s = <значение>\n", name, name);
+    return 0;
+}
+
+void setVar(const char* name, double value) {
+    if (!name || !*name) {
+        fprintf(stderr, "Ошибка: пустое имя переменной\n");
+        return;
+    }
+
+    // Проверяем, существует ли переменная
+    for (int i = 0; i < symCount; i++) {
+        if (strcmp(symTable[i].name, name) == 0) {
+            symTable[i].value = value;
+            symTable[i].defined = 1;
+            return;
+        }
+    }
+
+    // Добавляем новую переменную
+    if (symCount >= MAX_VARS) {
+        fprintf(stderr, "Ошибка: превышен лимит переменных (%d)\n", MAX_VARS);
+        return;
+    }
+
+    strncpy(symTable[symCount].name, name, VAR_NAME_LEN - 1);
+    symTable[symCount].name[VAR_NAME_LEN - 1] = '\0';  // Гарантия нуль-терминации
+    symTable[symCount].value = value;
+    symTable[symCount].defined = 1;
+    symCount++;
+}
+
 // Рекурсивное освобождение памяти
 void freeTree(Node* node) {
     if (node == NULL) return;
     freeTree(node->left);
     freeTree(node->right);
-    free(node);
+    free(node); // Дать обертку для подсчета
 }
 
 int main() {
@@ -197,8 +289,9 @@ int main() {
         return 1;
     }
 
-    double result = calculate(root);
-    printf("Результат: %g\n", result);
+    //добавть EVAL
+    // double result = calculate(root); 
+    // printf("Результат: %g\n", result);
 
     freeTree(root);
     return 0;
