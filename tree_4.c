@@ -4,20 +4,18 @@
 #include <math.h>
 #include <ctype.h>
 
-// Forward функций команд
+// ===== Прототипы =====
 void expr(const char* str);
 void prf(void);
 void pst(void);
 void save_prf(void);
 void save_pst(void);
 void eval(const char* str);
-
-// Функция парсингакоманд
 void process_commands(FILE* in, FILE* out);
 
+// ===== Структуры данных =====
 typedef enum { NODE_OP, NODE_NUM, NODE_VAR } NodeType;
 
-// Таблица переменных
 #define MAX_VARS 64
 #define VAR_NAME_LEN 64
 typedef struct { char name[VAR_NAME_LEN]; double value; int defined; } VarEntry;
@@ -28,34 +26,35 @@ typedef struct Node {
     NodeType type;
     char op;            // '+', '-', '*', '/', '%', '@', '!'
     double value;       // Для чисел
-    char var[64];       // Для переменных
+    char var[VAR_NAME_LEN]; // Для переменных
     struct Node *left;
     struct Node *right;
 } Node;
 
-// Глобальный указатель на текущую позицию в строке
-char* input;
+// ===== Глобальные переменные парсера =====
+static char* input = NULL;  // Единственный указатель для парсинга
+static Node* g_root = NULL;
 
-// Вспомогательная функция для пропуска пробелов
-void skipSpaces() {
-    while (*input && isspace((unsigned char)*input)) {
+// ===== Вспомогательные функции =====
+void skipSpaces(void) {
+    while (input && (*input == ' ' || *input == '\t')) {
         input++;
     }
 }
 
-// Forward-объявления функций парсинга
-Node* parseExpression();
-Node* parseTerm();
-Node* parseLCM();
-Node* parseUnary();
-Node* parseFactor();
+// Forward-объявления парсера
+Node* parseExpression(void);
+Node* parseTerm(void);
+Node* parseLCM(void);
+Node* parseUnary(void);
+Node* parseFactor(void);
 
-// Forward функции для определения переменных
+// Функции работы с переменными и деревом
 void setVar(const char* name, double value);
 double getVar(const char* name);
+void freeTree(Node* node);
 
-// Функция создания узла
-Node* createNode(NodeType type, char op, double val, char var[], Node* l, Node* r) {
+Node* createNode(NodeType type, char op, double val, const char var[], Node* l, Node* r) {
     Node* node = (Node*)malloc(sizeof(Node));
     if (!node) {
         fprintf(stderr, "Ошибка выделения памяти\n");
@@ -64,25 +63,22 @@ Node* createNode(NodeType type, char op, double val, char var[], Node* l, Node* 
     node->type = type;
     node->op = op;
     node->value = val;
-    
-    // Копируем имя переменной (если есть)
     if (var && var[0] != '\0') {
-        strncpy(node->var, var, 63);
-        node->var[63] = '\0';  // Гарантируем нуль-терминацию
+        strncpy(node->var, var, VAR_NAME_LEN - 1);
+        node->var[VAR_NAME_LEN - 1] = '\0';
     } else {
         node->var[0] = '\0';
     }
-    
     node->left = l;
     node->right = r;
     return node;
 }
 
-// 5. Самый слабый приоритет: + и -
-Node* parseExpression() {
+// ===== Рекурсивный спуск =====
+Node* parseExpression(void) {
     Node* left = parseTerm();
     skipSpaces();
-    while (*input == '+' || *input == '-') {
+    while (input && (*input == '+' || *input == '-')) {
         char op = *input++;
         left = createNode(NODE_OP, op, 0, NULL, left, parseTerm());
         skipSpaces();
@@ -90,11 +86,10 @@ Node* parseExpression() {
     return left;
 }
 
-// 4. Приоритет: * / %
-Node* parseTerm() {
+Node* parseTerm(void) {
     Node* left = parseLCM();
     skipSpaces();
-    while (*input == '*' || *input == '/' || *input == '%') {
+    while (input && (*input == '*' || *input == '/' || *input == '%')) {
         char op = *input++;
         left = createNode(NODE_OP, op, 0, NULL, left, parseLCM());
         skipSpaces();
@@ -102,23 +97,21 @@ Node* parseTerm() {
     return left;
 }
 
-// 3. Приоритет: @ (НОК)
-Node* parseLCM() {
+Node* parseLCM(void) {
     Node* left = parseUnary();
     skipSpaces();
-    while (*input == '@') {
+    while (input && *input == '@') {
         char op = *input++;
-        left = createNode(NODE_OP, op, 0,  NULL, left, parseUnary());
+        left = createNode(NODE_OP, op, 0, NULL, left, parseUnary());
         skipSpaces();
     }
     return left;
 }
 
-// 2. Приоритет: ! (Факториал)
-Node* parseUnary() {
+Node* parseUnary(void) {
     Node* node = parseFactor();
     skipSpaces();
-    while (*input == '!') {
+    while (input && *input == '!') {
         char op = *input++;
         node = createNode(NODE_OP, op, 0, NULL, node, NULL);
         skipSpaces();
@@ -126,132 +119,96 @@ Node* parseUnary() {
     return node;
 }
 
-// 1. Высший приоритет: скобки, числа и переменные
-Node* parseFactor() {
+Node* parseFactor(void) {
     skipSpaces();
-    
-    // Обработка скобок
+    if (!input) return NULL;
+
+    // Скобки
     if (*input == '(') {
-        input++; // Пропускаем '('
+        input++;
         Node* node = parseExpression();
         skipSpaces();
-        if (*input == ')') input++; // Пропускаем ')'
+        if (input && *input == ')') input++;
         return node;
     }
-    
-    // Проверка на переменную (идентификатор: буква или _ в начале)
+
+    // Переменная
     if (isalpha((unsigned char)*input) || *input == '_') {
-        char varName[64];
+        char varName[VAR_NAME_LEN];
         int i = 0;
-        // Читаем имя переменной: буквы, цифры, подчёркивания
-        while ((isalnum((unsigned char)*input) || *input == '_') && i < 63) {
+        while (i < VAR_NAME_LEN - 1 && (isalnum((unsigned char)*input) || *input == '_')) {
             varName[i++] = *input++;
         }
         varName[i] = '\0';
-        // Создаём узел типа NODE_VAR с именем переменной
         return createNode(NODE_VAR, 0, 0, varName, NULL, NULL);
     }
-    
-    // Читаем число
+
+    // Число
     char* endptr;
     double val = strtod(input, &endptr);
     if (endptr == input) {
-        fprintf(stderr, "Ошибка синтаксиса: ожидалось число, переменная или '(' в позиции: %s\n", input);
+        fprintf(stderr, "Ошибка синтаксиса: ожидалось число, переменная или '(' в позиции: '%s'\n", input);
         exit(EXIT_FAILURE);
     }
     input = endptr;
     return createNode(NODE_NUM, 0, val, NULL, NULL, NULL);
 }
 
-// Вспомогательная функция для НОД
+// ===== Математические операции =====
 long long gcd(long long a, long long b) {
     a = llabs(a); b = llabs(b);
-    while (b) {
-        long long t = b;
-        b = a % b;
-        a = t;
-    }
+    while (b) { long long t = b; b = a % b; a = t; }
     return a;
 }
 
-// Операция @: НОК(a, b) = |a*b| / НОД(a, b)
 double calculateLCM(double a, double b) {
     if (a == 0 || b == 0) return 0;
     return fabs(a * b) / gcd((long long)a, (long long)b);
 }
 
-// Операция !: Факториал
 double calculateFactorial(double n) {
     if (n < 0) return 0;
-    if (n != (int)n) return 0; // Факториал определён только для целых чисел
-    if (n > 20) {
-        fprintf(stderr, "Предупреждение: факториал >10 может привести к переполнению\n");
-    }
+    if (n != (int)n) return 0;
+    if (n > 20) fprintf(stderr, "Предупреждение: факториал >20 может привести к переполнению\n");
     double res = 1;
     for (int i = 2; i <= (int)n; i++) res *= i;
     return res;
 }
 
-// ГЛАВНАЯ ФУНКЦИЯ ОБХОДА ДЕРЕВА
 double calculate(struct Node* node) {
-    if (node == NULL) return 0;
-    
-    if (node->type == NODE_NUM) {
-        return node->value;
-    }
+    if (!node) return 0;
+    if (node->type == NODE_NUM) return node->value;
+    if (node->type == NODE_VAR) return getVar(node->var);
 
-    if (node->type == NODE_VAR) {
-        return getVar(node->var);
-    }
-
-    double leftVal = calculate(node->left);
-    double rightVal = calculate(node->right);
+    double l = calculate(node->left);
+    double r = calculate(node->right);
     switch (node->op) {
-        case '+': return leftVal + rightVal;
-        case '-': return leftVal - rightVal;
-        case '*': return leftVal * rightVal;
-        case '/':
-            if (rightVal == 0) return 0; // Защита от деления на ноль
-            return leftVal / rightVal;
-        case '%':
-            return (double)((long long)leftVal % (long long)rightVal);
-        case '@':
-            return calculateLCM(leftVal, rightVal);
-        case '!':
-            return calculateFactorial(leftVal);
-        default:
-            return 0;
+        case '+': return l + r;
+        case '-': return l - r;
+        case '*': return l * r;
+        case '/': return r == 0 ? 0 : l / r;
+        case '%': return (double)((long long)l % (long long)r);
+        case '@': return calculateLCM(l, r);
+        case '!': return calculateFactorial(l);
+        default: return 0;
     }
 }
 
+// ===== Работа с переменными =====
 double getVar(const char* name) {
-    if (!name || !*name) {
-        fprintf(stderr, "Ошибка: пустое имя переменной при чтении\n");
-        return 0;
-    }
-
+    if (!name || !*name) { fprintf(stderr, "Ошибка: пустое имя переменной\n"); return 0; }
     for (int i = 0; i < symCount; i++) {
         if (strcmp(symTable[i].name, name) == 0) {
-            if (!symTable[i].defined) {
-                fprintf(stderr, "Ошибка: переменная '%s' объявлена, но не имеет значения\n", name);
-                return 0;
-            }
+            if (!symTable[i].defined) { fprintf(stderr, "Ошибка: переменная '%s' не имеет значения\n", name); return 0; }
             return symTable[i].value;
         }
     }
-
-    // Переменная не найдена
-    fprintf(stderr, "Ошибка: переменная '%s' не определена. Используйте: eval %s = <значение>\n", name, name);
+    fprintf(stderr, "Предупреждение: переменная '%s' не определена (используется 0)\n", name);
     return 0;
 }
 
 void setVar(const char* name, double value) {
-    if (!name || !*name) {
-        fprintf(stderr, "Ошибка: пустое имя переменной\n");
-        return;
-    }
-
-    // Проверяем, существует ли переменная
+    if (!name || !*name) return;
     for (int i = 0; i < symCount; i++) {
         if (strcmp(symTable[i].name, name) == 0) {
             symTable[i].value = value;
@@ -259,30 +216,47 @@ void setVar(const char* name, double value) {
             return;
         }
     }
-
-    // Добавляем новую переменную
-    if (symCount >= MAX_VARS) {
-        fprintf(stderr, "Ошибка: превышен лимит переменных (%d)\n", MAX_VARS);
-        return;
-    }
-
+    if (symCount >= MAX_VARS) { fprintf(stderr, "Ошибка: лимит переменных исчерпан\n"); return; }
     strncpy(symTable[symCount].name, name, VAR_NAME_LEN - 1);
-    symTable[symCount].name[VAR_NAME_LEN - 1] = '\0';  // Гарантия нуль-терминации
+    symTable[symCount].name[VAR_NAME_LEN - 1] = '\0';
     symTable[symCount].value = value;
     symTable[symCount].defined = 1;
     symCount++;
 }
 
-// Рекурсивное освобождение памяти
 void freeTree(Node* node) {
-    if (node == NULL) return;
+    if (!node) return;
     freeTree(node->left);
     freeTree(node->right);
-    free(node); // Дать обертку для подсчета
+    free(node);
 }
 
-void expr(const char* str){
-    return;
+// ===== Реализация команд =====
+void expr(const char* str) {
+    // fprintf(stderr, "[DEBUG] expr() вызвана с: '%s'\n", str ? str : "NULL");
+    if (!str || *str == '\0') {
+        fprintf(stdout, "incorrect\n");
+        // fprintf(stderr, "[DEBUG] Пустая строка, выход\n");
+        return;
+    }
+
+    if (g_root) { freeTree(g_root); g_root = NULL; }
+
+    input = (char*)str;
+    // fprintf(stderr, "[DEBUG] Указатель установлен. Парсинг...\n");
+    
+    Node* result = parseExpression();
+    
+    skipSpaces();
+    if (input && *input != '\0') {
+        fprintf(stderr, "Предупреждение: нераспознанные символы после выражения: '%s'\n", input);
+        fprintf(stdout, "incorrect\n");
+    }
+
+    g_root = result;
+    printf("expr test\n");
+    fflush(stdout); // Гарантируем мгновенный вывод в консоль
+    // fprintf(stderr, "[DEBUG] expr() завершена успешно\n");
 }
 
 void prf(void){
@@ -305,39 +279,35 @@ void eval(const char* str){
     return;
 }
 
+// ===== Обработчик команд =====
 void process_commands(FILE* in, FILE* out) {
-    char line[4096];      // Буфер для чтения строки из файла
-    char arg[1024];       // Буфер для аргументов (ровно 1024 байта по условию)
+    char line[4096];
+    char arg[1024];
 
     while (fgets(line, sizeof(line), in) != NULL) {
-        // 1. Игнорируем пустые строки
-        if (line[0] == '\n' || line[0] == '\r' || line[0] == '\0') {
-            continue;
-        }
-
-        // 2. Если строка начинается с пробельного символа
+        // Пустые строки
+        if (line[0] == '\n' || line[0] == '\r' || line[0] == '\0') continue;
+        
+        // Пробелы в начале
         if (isspace((unsigned char)line[0])) {
             fprintf(out, "incorrent\n");
             continue;
         }
 
-        // Вспомогательная логика копирования аргумента (inline для наглядности)
         #define COPY_ARG(start_idx) \
         do { \
             const char* src = line + (start_idx); \
             size_t i = 0; \
-            while (i < 1024 && src[i] != '\n' && src[i] != '\r' && src[i] != '\0') { \
+            while (i < 1023 && src[i] != '\n' && src[i] != '\r' && src[i] != '\0') { \
                 arg[i] = src[i]; \
                 i++; \
             } \
-            /* Замена последнего символа на \0 при достижении лимита или конце строки */ \
-            if (i == 1024) arg[1023] = '\0'; \
-            else arg[i] = '\0'; \
+            arg[i] = '\0'; \
         } while(0)
 
-        // 3. Парсинг и вызов команд
-        if (strncmp(line, "parse ", 6) == 0) {
-            COPY_ARG(6);
+        if (strncmp(line, "parse expr", 10) == 0) {
+            COPY_ARG(10);
+            // fprintf(stderr, "[DEBUG] Команда 'parse expr' распознана. Аргумент: '%s'\n", arg);
             expr(arg);
         }
         else if (strncmp(line, "load_prf", 8) == 0 && (line[8] == ' ' || line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
@@ -357,37 +327,30 @@ void process_commands(FILE* in, FILE* out) {
             eval(arg);
         }
         else {
-            // Неизвестная команда
             fprintf(out, "incorrent\n");
         }
-
         #undef COPY_ARG
     }
 }
 
-int main() {
-    char expr[1024];
-    printf("Введите выражение (поддерживаются: + - * / %% @ !): ");
-    if (fgets(expr, sizeof(expr), stdin) == NULL) return 1;
+// ===== Main =====
+int main(void) {
+    FILE* input_file = fopen("input.txt", "r");
+    if (!input_file) { printf("Error of open input.txt\n"); return 1; }
 
-    // Убираем символ новой строки
-    expr[strcspn(expr, "\n")] = '\0';
+    FILE* output = fopen("output.txt", "w");
+    if (!output) { printf("Error of open output.txt\n"); fclose(input_file); return 1; }
 
-    input = expr;
-    Node* root = parseExpression();
-    skipSpaces();
+    input = NULL;
+    g_root = NULL;
+    symCount = 0;
+    memset(symTable, 0, sizeof(symTable));
 
-    // Проверяем, что вся строка была успешно разобрана
-    if (*input != '\0') {
-        fprintf(stderr, "Ошибка: неверный синтаксис после позиции '%s'\n", input);
-        freeTree(root);
-        return 1;
-    }
+    process_commands(input_file, output);
 
-    //добавть EVAL
-    // double result = calculate(root); 
-    // printf("Результат: %g\n", result);
+    if (g_root) { freeTree(g_root); g_root = NULL; }
 
-    freeTree(root);
+    fclose(input_file);
+    fclose(output);
     return 0;
 }
