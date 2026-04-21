@@ -5,9 +5,9 @@
 #include <ctype.h>
 
 // ===== Прототипы =====
-void expr(const char* str);
-void prf(void);
-void pst(void);
+void expr(const char* str, FILE* out);
+void load_prf(const char* expr, FILE* out);
+void load_pst(const char* expr, FILE* out);
 void save_prf(void);
 void save_pst(void);
 void eval(const char* str);
@@ -232,39 +232,149 @@ void freeTree(Node* node) {
 }
 
 // ===== Реализация команд =====
-void expr(const char* str) {
-    // fprintf(stderr, "[DEBUG] expr() вызвана с: '%s'\n", str ? str : "NULL");
+void expr(const char* str, FILE* out) {
     if (!str || *str == '\0') {
-        fprintf(stdout, "incorrect\n");
-        // fprintf(stderr, "[DEBUG] Пустая строка, выход\n");
+        fprintf(out, "incorrect\n");
         return;
     }
-
-    if (g_root) { freeTree(g_root); g_root = NULL; }
-
-    input = (char*)str;
-    // fprintf(stderr, "[DEBUG] Указатель установлен. Парсинг...\n");
     
+    // Освобождаем предыдущее дерево
+    if (g_root != NULL) {
+        freeTree(g_root);
+        g_root = NULL;
+    }
+    
+    // Инициализируем указатель парсинга
+    input = (char*)str;
+    
+    // Пропускаем ведущие пробелы
+    skipSpaces();
+    
+    // Проверяем, что строка не пустая после пробелов
+    if (*input == '\0') {
+        fprintf(out, "incorrect\n");
+        return;
+    }
+    
+    // Парсим выражение
     Node* result = parseExpression();
     
+    // Проверяем, что всё распарсилось корректно
     skipSpaces();
-    if (input && *input != '\0') {
-        fprintf(stderr, "Предупреждение: нераспознанные символы после выражения: '%s'\n", input);
-        fprintf(stdout, "incorrect\n");
+    if (!result || (*input != '\0' && *input != '\n' && *input != '\r')) {
+        fprintf(out, "incorrect\n");
+        if (result) freeTree(result);
+        g_root = NULL;
+    } else {
+        fprintf(out, "success\n");
+        g_root = result;
+    }
+}
+
+// === Префиксная форма (load_prf) ===
+static Node* parse_prf_recursive(const char** ptr, int* error) {
+    if (*error) return NULL;
+    while (**ptr == ' ' || **ptr == '\t') (*ptr)++;
+    if (**ptr == '\0' || **ptr == '\n' || **ptr == '\r') { *error = 1; return NULL; }
+
+    char token[64];
+    size_t i = 0;
+    while (i < 63 && **ptr != ' ' && **ptr != '\t' && **ptr != '\0' && **ptr != '\n' && **ptr != '\r')
+        token[i++] = *(*ptr)++;
+    token[i] = '\0';
+
+    if (i == 1 && strchr("+-*/%@!", token[0])) {
+        char op = token[0];
+        Node* node = createNode(NODE_OP, op, 0, NULL, NULL, NULL);
+        if (op == '!') {
+            node->left = parse_prf_recursive(ptr, error);
+            node->right = NULL;
+        } else {
+            node->left = parse_prf_recursive(ptr, error);
+            if (*error) { free(node); return NULL; }
+            node->right = parse_prf_recursive(ptr, error);
+        }
+        if (*error || !node->left || (op != '!' && !node->right)) { *error = 1; free(node); return NULL; }
+        return node;
+    } else {
+        char* endptr;
+        double val = strtod(token, &endptr);
+        return (*endptr == '\0') ? createNode(NODE_NUM, 0, val, NULL, NULL, NULL)
+                                 : createNode(NODE_VAR, 0, 0, token, NULL, NULL);
+    }
+}
+
+void load_prf(const char* expr, FILE* out) {
+    if (!expr || *expr == '\0') { fprintf(out, "incorrect\n"); return; }
+    if (g_root) { freeTree(g_root); g_root = NULL; }
+
+    const char* ptr = expr;
+    int error = 0;
+    Node* tree = parse_prf_recursive(&ptr, &error);
+
+    while (ptr && (*ptr == ' ' || *ptr == '\t')) ptr++;
+    if (!error && *ptr != '\0' && *ptr != '\n' && *ptr != '\r') error = 1;
+
+    if (error || !tree) {
+        fprintf(out, "incorrect\n");
+        if (tree) freeTree(tree);
+        g_root = NULL;
+    } else {
+        fprintf(out, "success\n");
+        g_root = tree;
+    }
+}
+
+// === Постфиксная форма (load_pst) ===
+void load_pst(const char* expr, FILE* out) {
+    if (!expr || *expr == '\0') { fprintf(out, "incorrect\n"); return; }
+    if (g_root) { freeTree(g_root); g_root = NULL; }
+
+    Node* stack[1024];
+    int top = -1;
+    const char* ptr = expr;
+    int error = 0;
+
+    while (1) {
+        while (*ptr == ' ' || *ptr == '\t') ptr++;
+        if (*ptr == '\0' || *ptr == '\n' || *ptr == '\r') break;
+
+        char token[64];
+        size_t i = 0;
+        while (i < 63 && *ptr != ' ' && *ptr != '\t' && *ptr != '\0' && *ptr != '\n' && *ptr != '\r')
+            token[i++] = *ptr++;
+        token[i] = '\0';
+
+        if (i == 1 && strchr("+-*/%@!", token[0])) {
+            char op = token[0];
+            if (op == '!') {
+                if (top < 0) { error = 1; break; }
+                Node* left = stack[top--];
+                stack[++top] = createNode(NODE_OP, op, 0, NULL, left, NULL);
+            } else {
+                if (top < 1) { error = 1; break; }
+                Node* right = stack[top--];
+                Node* left = stack[top--];
+                stack[++top] = createNode(NODE_OP, op, 0, NULL, left, right);
+            }
+        } else {
+            char* endptr;
+            double val = strtod(token, &endptr);
+            Node* node = (*endptr == '\0') ? createNode(NODE_NUM, 0, val, NULL, NULL, NULL)
+                                           : createNode(NODE_VAR, 0, 0, token, NULL, NULL);
+            if (top >= 1023) { error = 1; free(node); break; }
+            stack[++top] = node;
+        }
     }
 
-    g_root = result;
-    printf("expr test\n");
-    fflush(stdout); // Гарантируем мгновенный вывод в консоль
-    // fprintf(stderr, "[DEBUG] expr() завершена успешно\n");
-}
-
-void prf(void){
-    return;
-}
-
-void pst(void){
-    return;
+    if (error || top != 0) {
+        fprintf(out, "incorrect\n");
+        for (int i = 0; i <= top; i++) freeTree(stack[i]);
+        g_root = NULL;
+    } else {
+        fprintf(out, "success\n");
+        g_root = stack[0];
+    }
 }
 
 void save_prf(void){
@@ -283,43 +393,45 @@ void eval(const char* str){
 void process_commands(FILE* in, FILE* out) {
     char line[4096];
     char arg[1024];
-
     while (fgets(line, sizeof(line), in) != NULL) {
         // Пустые строки
         if (line[0] == '\n' || line[0] == '\r' || line[0] == '\0') continue;
-        
         // Пробелы в начале
         if (isspace((unsigned char)line[0])) {
-            fprintf(out, "incorrent\n");
+            fprintf(out, "incorrect\n");
             continue;
         }
-
-        #define COPY_ARG(start_idx) \
+        
+#define COPY_ARG(start_idx) \
         do { \
             const char* src = line + (start_idx); \
             size_t i = 0; \
             while (i < 1023 && src[i] != '\n' && src[i] != '\r' && src[i] != '\0') { \
-                arg[i] = src[i]; \
-                i++; \
+                arg[i] = src[i]; i++; \
             } \
             arg[i] = '\0'; \
         } while(0)
 
         if (strncmp(line, "parse expr", 10) == 0) {
             COPY_ARG(10);
-            // fprintf(stderr, "[DEBUG] Команда 'parse expr' распознана. Аргумент: '%s'\n", arg);
-            expr(arg);
+            expr(arg, out);
         }
-        else if (strncmp(line, "load_prf", 8) == 0 && (line[8] == ' ' || line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
-            prf();
+        else if (strncmp(line, "load_prf", 8) == 0 &&
+                 (line[8] == ' ' || line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
+            COPY_ARG(8);  // <-- ДОБАВЛЕНО: копируем аргумент для load_prf
+            load_prf(arg, out);
         }
-        else if (strncmp(line, "load_pst", 8) == 0 && (line[8] == ' ' || line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
-            pst();
+        else if (strncmp(line, "load_pst", 8) == 0 &&
+                 (line[8] == ' ' || line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
+            COPY_ARG(8);  // <-- ДОБАВЛЕНО: копируем аргумент для load_pst
+            load_pst(arg, out);
         }
-        else if (strncmp(line, "save_prf", 8) == 0 && (line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
+        else if (strncmp(line, "save_prf", 8) == 0 &&
+                 (line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
             save_prf();
         }
-        else if (strncmp(line, "save_pst", 8) == 0 && (line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
+        else if (strncmp(line, "save_pst", 8) == 0 &&
+                 (line[8] == '\n' || line[8] == '\r' || line[8] == '\0')) {
             save_pst();
         }
         else if (strncmp(line, "eval ", 5) == 0) {
@@ -327,9 +439,9 @@ void process_commands(FILE* in, FILE* out) {
             eval(arg);
         }
         else {
-            fprintf(out, "incorrent\n");
+            fprintf(out, "incorrect\n");
         }
-        #undef COPY_ARG
+#undef COPY_ARG
     }
 }
 
@@ -343,13 +455,12 @@ int main(void) {
 
     input = NULL;
     g_root = NULL;
-    symCount = 0;
     memset(symTable, 0, sizeof(symTable));
+    symCount = 0;
 
     process_commands(input_file, output);
 
     if (g_root) { freeTree(g_root); g_root = NULL; }
-
     fclose(input_file);
     fclose(output);
     return 0;
